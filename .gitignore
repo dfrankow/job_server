@@ -1,1 +1,4 @@
 *~
+request_dirs
+*.pyc
+server_config.yaml

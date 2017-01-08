@@ -26,6 +26,7 @@ REQUEST_DIR_PATH = 'request_dirs'
 REQUEST_DIR_SEMAPHORE = gevent.lock.Semaphore()
 JOBS_DIR_PATH = os.path.join(os.getcwd(), 'jobs')
 
+
 def request_path(request_num):
     return os.path.join(REQUEST_DIR_PATH, str(request_num))
 
@@ -82,7 +83,7 @@ def hello():
     return __name__
 
 
-@app.route("/jobs", methods = ['GET', 'POST'])
+@app.route("/jobs", methods=['GET', 'POST'])
 def jobs():
     if request.method == 'GET':
         return "TODO: show jobs"
@@ -97,6 +98,7 @@ def jobs():
         # method not allowed
         return Response(405)
 
+
 def jobs_start(request_json):
     # Check preconditions
     job_name = request_json.get('job_name', '')
@@ -104,9 +106,13 @@ def jobs_start(request_json):
         return Response(json.dumps({'error': 'No job_name given'}), status=400)
     the_job_path = job_path(job_name)
     if not os.path.exists(the_job_path):
-        return Response(json.dumps({"error": "No job %s" % job_name}), status=400)
+        return Response(
+            json.dumps({"error": "No job %s" % job_name}), status=400)
     if not (os.path.isfile(the_job_path) and os.access(the_job_path, os.X_OK)):
-        return Response(json.dumps({"error": "Job %s is not an executable file" % job_name}), status=400)
+        return Response(
+            json.dumps({"error": "Job %s is not an executable file"
+                        % job_name}),
+            status=400)
 
     # Do the job in its own request directory
     request_num, request_dir = create_request_dir()
@@ -116,9 +122,9 @@ def jobs_start(request_json):
     shutil.rmtree(request_dir)
 
     # Respond
-    resp = { 'request_number': request_num,
-             'stdout': stdoutdata,
-             'stderr': stderrdata }
+    resp = {'request_number': request_num,
+            'stdout': stdoutdata,
+            'stderr': stderrdata}
     return Response(json.dumps(resp), status=200, mimetype='application/json')
 
 

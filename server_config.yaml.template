@@ -1,0 +1,2 @@
+# Only send emails to recipients that match this regular expression
+mail_filter: example.com

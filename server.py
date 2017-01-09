@@ -24,15 +24,120 @@ import mail_utils
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
-__request_num = 0
 SMTP_HOST = 'localhost'
 CONFIG_FILE = 'server_config.yaml'
-REQUEST_DIR_PATH = os.path.join(os.getcwd(), 'request_dirs')
-REQUEST_DIR_SEMAPHORE = gevent.lock.Semaphore()
 JOBS_DIR_PATH = os.path.join(os.getcwd(), 'jobs')
 
 
-def config():
+class Request(object):
+    """A request is json from a client asking to run a job.
+    It runs in its own directory.
+    """
+    DIR_PATH = os.path.join(os.getcwd(), 'request_dirs')
+    SEMAPHORE = gevent.lock.Semaphore()
+    __request_num = 0
+
+    @staticmethod
+    def create_request_dir():
+        """Create a new request dir.
+
+        Return request_num, request_dir_path"""
+        Request.SEMAPHORE.acquire()
+        Request.__request_num += 1
+        while os.path.exists(Request.request_path(Request.__request_num)):
+            Request.__request_num += 1
+        my_request_num = Request.__request_num
+        Request.SEMAPHORE.release()
+        the_path = Request.request_path(my_request_num)
+        os.mkdir(the_path)
+        return my_request_num, the_path
+
+    @staticmethod
+    def request_path(request_num):
+        return os.path.join(Request.DIR_PATH, str(request_num))
+
+    def __init__(self, request_json):
+        self.job_name = request_json.get('job_name', '')
+        self.job_path = make_job_path(self.job_name)
+        self.email_results_to = request_json.get('email_results_to')
+        self.files = request_json.get('files', {})
+        self.leave_output = request_json.get('leave_output', False)
+        # self.request_json is for logging
+        self.request_json = request_json
+
+    def sanity_check(self):
+        """Return a Response if request params are wrong, else None."""
+        if not self.job_name:
+            return Response(json.dumps({'error': 'No job_name given'}),
+                            status=400)
+        if not os.path.exists(self.job_path):
+            return Response(
+                json.dumps({"error": "No job %s" % request.job_name}),
+                status=400)
+        if not (os.path.isfile(self.job_path) and
+                os.access(self.job_path, os.X_OK)):
+            return Response(
+                json.dumps({"error": "Job %s is not an executable file"
+                            % self.job_name}),
+                status=400)
+        return None
+
+    def email_results(self):
+        if not self.email_results_to:
+            return
+
+        # pack up the output and email
+        # if there are any return files, attach them
+        return_files_path = os.path.join(self.request_dir, 'return_files.txt')
+        attachments = []
+        if os.path.isfile(return_files_path):
+            for filename in open(return_files_path).readlines():
+                filepath = os.path.join(self.request_dir, filename.strip())
+                logging.info("Try attaching %s to email" % filepath)
+                if os.path.isfile(filepath):
+                    attachments.append(
+                        mail_utils.attachment_from_file(filepath))
+                else:
+                    logging.warning("%s is not a file" % filepath)
+        mail_utils.send_simple_mail(
+            SMTP_HOST, "job_server", self.email_results_to,
+            "Results of %s" % self.job_name,
+            "stdout:\n%s\n\nstderr:\n%s\n\n" % (
+                self.stdoutdata, self.stderrdata),
+            attachments=attachments)
+
+    def put_files(self):
+        """Put contents of files into self.request_dir.
+
+        files is a map where the keys are treated as filenames
+        and the values as file contents.
+        """
+        for name, contents in self.files.iteritems():
+            path = os.path.join(self.request_dir, name)
+            if os.path.exists(path):
+                logging.warning("Overwriting %s" % path)
+            else:
+                logging.info("Writing %s" % path)
+            with open(path, "wb") as f:
+                f.write(contents)
+
+    def run_job(self):
+        """Run the job in its own request directory"""
+        self.request_num, self.request_dir = self.create_request_dir()
+        logging.info("request %d: json %s" % (
+            self.request_num, self.request_json))
+        # Put files from request into request_dir
+        self.put_files()
+        self.stdoutdata, self.stderrdata = run_command(
+            self.request_dir, [self.job_path, str(self.request_num)])
+
+        self.email_results()
+        # remove request directory
+        if not self.leave_output:
+            shutil.rmtree(self.request_dir)
+
+
+def server_config():
     if os.path.exists(CONFIG_FILE):
         doc = yaml.load(open(CONFIG_FILE))
         logging.info('config:\n%s' % open(CONFIG_FILE).read())
@@ -41,35 +146,8 @@ def config():
         logging.warning("No %s" % CONFIG_FILE)
 
 
-def request_path(request_num):
-    return os.path.join(REQUEST_DIR_PATH, str(request_num))
-
-
-def job_path(job_name):
+def make_job_path(job_name):
     return os.path.join(JOBS_DIR_PATH, job_name)
-
-
-def create_request_dir():
-    """Create a new request dir.
-
-    Return request_num, request_dir_path"""
-    global __request_num
-
-    REQUEST_DIR_SEMAPHORE.acquire()
-    __request_num += 1
-    while os.path.exists(request_path(__request_num)):
-        __request_num += 1
-    my_request_num = __request_num
-    REQUEST_DIR_SEMAPHORE.release()
-    the_path = request_path(my_request_num)
-    os.mkdir(the_path)
-    return my_request_num, the_path
-
-
-def do_job(request_num, request_dir, job_name):
-    return run_command(
-        request_dir,
-        [os.path.join(JOBS_DIR_PATH, job_name), str(request_num)])
 
 
 def run_command(request_dir, args):
@@ -92,73 +170,18 @@ def run_command(request_dir, args):
     return stdoutdata, stderrdata
 
 
-def email_results(email_results_to, request_dir, job_name, stdoutdata, stderrdata):
-    if email_results_to:
-        # pack up the output and email
-        # if there are any return files, attach them
-        return_files_path = os.path.join(request_dir, 'return_files.txt')
-        attachments = []
-        if os.path.isfile(return_files_path):
-            for filename in open(return_files_path).readlines():
-                filepath = os.path.join(request_dir, filename.strip())
-                logging.info("Try attaching %s to email" % filepath)
-                if os.path.isfile(filepath):
-                    attachments.append(mail_utils.attachment_from_file(filepath))
-                else:
-                    logging.warning("%s is not a file" % filepath)
-        mail_utils.send_simple_mail(
-            SMTP_HOST, "job_server", email_results_to, "Results of %s" % job_name,
-            "stdout:\n%s\n\nstderr:\n%s\n\n" % (stdoutdata, stderrdata),
-            attachments = attachments)
-
-
-def put_files(request_dir, files):
-    """Put contents of files into request_dir.
-
-    files is a map where the keys are treated as filenames
-    and the values as file contents.
-    """
-    for name, contents in files.iteritems():
-        path = os.path.join(request_dir, name)
-        if os.path.exists(path):
-            logging.warning("Overwriting %s" % path)
-        else:
-            logging.info("Writing %s" % path)
-        with open(path, "wb") as f:
-            f.write(contents)
-
-
 def jobs_start(request_json):
-    # Check preconditions
-    job_name = request_json.get('job_name', '')
-    if not job_name:
-        return Response(json.dumps({'error': 'No job_name given'}), status=400)
-    the_job_path = job_path(job_name)
-    if not os.path.exists(the_job_path):
-        return Response(
-            json.dumps({"error": "No job %s" % job_name}), status=400)
-    if not (os.path.isfile(the_job_path) and os.access(the_job_path, os.X_OK)):
-        return Response(
-            json.dumps({"error": "Job %s is not an executable file"
-                        % job_name}),
-            status=400)
+    request = Request(request_json)
+    resp = request.sanity_check()
+    if resp:
+        return resp
 
-    # Do the job in its own request directory
-    request_num, request_dir = create_request_dir()
-    logging.info("request %d: json %s" % (request_num, request_json))
-    # Put files from request into request_dir
-    put_files(request_dir, request_json.get('files', {}))
-    stdoutdata, stderrdata = do_job(request_num, request_dir, job_name)
-    email_results(request_json.get('email_results_to'), request_dir, job_name,
-                  stdoutdata, stderrdata)
-    # remove request directory
-    if not request_json.get('leave_output'):
-        shutil.rmtree(request_dir)
+    request.run_job()
 
     # Respond
-    resp = {'request_number': request_num,
-            'stdout': stdoutdata,
-            'stderr': stderrdata}
+    resp = {'request_number': request.request_num,
+            'stdout': request.stdoutdata,
+            'stderr': request.stderrdata}
     return Response(json.dumps(resp), status=200, mimetype='application/json')
 
 
@@ -192,7 +215,7 @@ def main():
         print >>sys.stderr, "Usage: %s [port]" % __file__
         sys.exit(1)
     logging.info("Running on port: %s" % port)
-    config()
+    server_config()
     gevent.pywsgi.WSGIServer(("0.0.0.0", port), app).serve_forever()
 
 

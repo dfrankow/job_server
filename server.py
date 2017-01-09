@@ -21,7 +21,8 @@ import yaml
 
 import mail_utils
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s",
+                    level=logging.INFO)
 
 app = Flask(__name__)
 SMTP_HOST = 'localhost'
@@ -33,24 +34,13 @@ class Request(object):
     """A request is json from a client asking to run a job.
     It runs in its own directory.
     """
-    DIR_PATH = os.path.join(os.getcwd(), 'request_dirs')
     SEMAPHORE = gevent.lock.Semaphore()
+    # Where a request gets its own directory
+    DIR_PATH = os.path.join(os.getcwd(), 'request_dirs')
+    # Global var to get a new request number
     __request_num = 0
-
-    @staticmethod
-    def create_request_dir():
-        """Create a new request dir.
-
-        Return request_num, request_dir_path"""
-        Request.SEMAPHORE.acquire()
-        Request.__request_num += 1
-        while os.path.exists(Request.request_path(Request.__request_num)):
-            Request.__request_num += 1
-        my_request_num = Request.__request_num
-        Request.SEMAPHORE.release()
-        the_path = Request.request_path(my_request_num)
-        os.mkdir(the_path)
-        return my_request_num, the_path
+    # Map of all requests
+    # __request_map = {}
 
     @staticmethod
     def request_path(request_num):
@@ -64,6 +54,21 @@ class Request(object):
         self.leave_output = request_json.get('leave_output', False)
         # self.request_json is for logging
         self.request_json = request_json
+
+    def _create_request_dir(self):
+        """Create a new request dir.
+
+        Assign self.request_num, self.request_dir.
+        """
+        Request.SEMAPHORE.acquire()
+        Request.__request_num += 1
+        while os.path.exists(Request.request_path(Request.__request_num)):
+            Request.__request_num += 1
+        self.request_num = Request.__request_num
+        self.request_dir = Request.request_path(self.request_num)
+        os.mkdir(self.request_dir)
+        # Request.__request_map[self.request_num] = self
+        Request.SEMAPHORE.release()
 
     def sanity_check(self):
         """Return a Response if request params are wrong, else None."""
@@ -82,7 +87,11 @@ class Request(object):
                 status=400)
         return None
 
-    def email_results(self):
+    def _email_results(self):
+        """Email results if self.email_results_to is set.
+
+        Files listed in return_files.txt are attached.
+        """
         if not self.email_results_to:
             return
 
@@ -106,7 +115,7 @@ class Request(object):
                 self.stdoutdata, self.stderrdata),
             attachments=attachments)
 
-    def put_files(self):
+    def _put_files(self):
         """Put contents of files into self.request_dir.
 
         files is a map where the keys are treated as filenames
@@ -123,15 +132,15 @@ class Request(object):
 
     def run_job(self):
         """Run the job in its own request directory"""
-        self.request_num, self.request_dir = self.create_request_dir()
+        self._create_request_dir()
         logging.info("request %d: json %s" % (
-            self.request_num, self.request_json))
+            self.request_num, json.dumps(self.request_json, indent=4)))
         # Put files from request into request_dir
-        self.put_files()
+        self._put_files()
         self.stdoutdata, self.stderrdata = run_command(
             self.request_dir, [self.job_path, str(self.request_num)])
 
-        self.email_results()
+        self._email_results()
         # remove request directory
         if not self.leave_output:
             shutil.rmtree(self.request_dir)
@@ -176,12 +185,10 @@ def jobs_start(request_json):
     if resp:
         return resp
 
-    request.run_job()
+    gevent.spawn(request.run_job())
 
     # Respond
-    resp = {'request_number': request.request_num,
-            'stdout': request.stdoutdata,
-            'stderr': request.stderrdata}
+    resp = {'request_number': request.request_num}
     return Response(json.dumps(resp), status=200, mimetype='application/json')
 
 

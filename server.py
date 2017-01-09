@@ -112,6 +112,22 @@ def email_results(email_results_to, request_dir, job_name, stdoutdata, stderrdat
             attachments = attachments)
 
 
+def put_files(request_dir, files):
+    """Put contents of files into request_dir.
+
+    files is a map where the keys are treated as filenames
+    and the values as file contents.
+    """
+    for name, contents in files.iteritems():
+        path = os.path.join(request_dir, name)
+        if os.path.exists(path):
+            logging.warning("Overwriting %s" % path)
+        else:
+            logging.info("Writing %s" % path)
+        with open(path, "wb") as f:
+            f.write(contents)
+
+
 def jobs_start(request_json):
     # Check preconditions
     job_name = request_json.get('job_name', '')
@@ -130,6 +146,8 @@ def jobs_start(request_json):
     # Do the job in its own request directory
     request_num, request_dir = create_request_dir()
     logging.info("request %d: json %s" % (request_num, request_json))
+    # Put files from request into request_dir
+    put_files(request_dir, request_json.get('files', {}))
     stdoutdata, stderrdata = do_job(request_num, request_dir, job_name)
     email_results(request_json.get('email_results_to'), request_dir, job_name,
                   stdoutdata, stderrdata)

@@ -55,7 +55,7 @@ class Request(object):
         # self.request_json is for logging
         self.request_json = request_json
 
-    def _create_request_dir(self):
+    def create_request_dir(self):
         """Create a new request dir.
 
         Assign self.request_num, self.request_dir.
@@ -132,7 +132,6 @@ class Request(object):
 
     def run_job(self):
         """Run the job in its own request directory"""
-        self._create_request_dir()
         logging.info("request %d: json %s" % (
             self.request_num, json.dumps(self.request_json, indent=4)))
         # Put files from request into request_dir
@@ -184,8 +183,9 @@ def jobs_start(request_json):
     resp = request.sanity_check()
     if resp:
         return resp
-
-    gevent.spawn(request.run_job())
+    # assigns request_num
+    request.create_request_dir()
+    gevent.spawn(request.run_job)
 
     # Respond
     resp = {'request_number': request.request_num}
